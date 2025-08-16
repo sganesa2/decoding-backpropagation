@@ -1,0 +1,22 @@
+[project]
+name = "decoding-backpropagation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "decoding-backpropagation",
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.10.5",
+    "pytest>=8.4.1",
+    "torch>=2.8.0",
+]
+
+[tool.uv.sources]
+decoding-backpropagation = { workspace = true }
+
+[tool.pytest.ini_options]
+pythonpath = ['src']
