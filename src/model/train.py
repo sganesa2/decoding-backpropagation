@@ -30,12 +30,26 @@ class BatchNormalizedMLP:
         self.H_bnstd_running = torch.ones(h)
         self.momentum:float = 0.999
 
-        self.pytorch_computed_loss = torch.tensor(0)
-        self.manually_computed_loss = torch.tensor(0)
+        self.cross_entropy_loss = torch.tensor(0.0)
 
     @property
     def params(self)->list[torch.Tensor]:
         return [self.C, self.H, self.W1, self.W2, self.b2, self.H_bngain, self.H_bnbias]
+    
+    def _retain_intermediate_tensor_grads(self)->None:
+        """
+        Retain intermediate tensor gradients for debugging purposes.
+        I'll be using it to compare the pytorch computes gradients of intermediate tensors,
+        and my manual computaion of the graidents of the same intermediate tensors.
+        """
+        for param in [
+            self.logprobs, self.probs, self.counts_sum_inv, self.counts_sum,
+            self.counts, self.norm_logits, self.logit_maxes, self.logits,
+            self.l1, self.l2, self.h, self.hpreact, self.H_bngain, self.H_bnbias,
+            self.bnraw, self.bndiff, self.bnvar_inv, self.bnvar, self.bndiff2,
+            self.bndiff, self.bnmean, self.hprebn, self.embcat, self.emb
+        ]:
+            param.retain_grad()
 
     def _kaiming_init_all_weights(self)->None:
         """
@@ -94,16 +108,7 @@ class BatchNormalizedMLP:
         self.logits = self.l1+self.l2
         return self.logits
 
-    def cmp(self, name:str, dt:torch.tensor, t:torch.Tensor)->None:
-        """
-        Utility function for comparing manual gradients to PyTorch gradients
-        """
-        ex = torch.all(dt == t.grad).item()
-        app = torch.allclose(dt, t.grad)
-        maxdiff = (dt - t.grad).abs().max().item()
-        assert ex or app, f"Gradients for {name} do not match! Max difference: {maxdiff}"
-
-    # def _manual_backward_pass(self, x:torch.Tensor, y:torch.Tensor)->None:
+    # def manual_backward_pass(self, x:torch.Tensor, y:torch.Tensor)->None:
     #     dlogprobs = torch.zeros([*logprobs.shape])
     #     dlogprobs[range(n), Yb] += -1*(n**-1)
     #     dprobs = dlogprobs*(1/probs)
@@ -145,34 +150,34 @@ class BatchNormalizedMLP:
 
 
 
-    #     self.cmp('logprobs', dlogprobs, logprobs)
-    #     self.cmp('probs', dprobs, probs)
-    #     self.cmp('counts_sum_inv', dcounts_sum_inv, counts_sum_inv)
-    #     self.cmp('counts_sum', dcounts_sum, counts_sum)
-    #     self.cmp('counts', dcounts, counts)
-    #     self.cmp('norm_logits', dnorm_logits, norm_logits)
-    #     self.cmp('logit_maxes', dlogit_maxes, logit_maxes)
-    #     self.cmp('logits', dlogits, logits)
-    #     self.cmp('h', dh, h)
-    #     self.cmp('W2', dW2, W2)
-    #     self.cmp('b2', db2, b2)
-    #     self.cmp('hpreact', dhpreact, hpreact)
-    #     self.cmp('bngain', dbngain, bngain)
-    #     self.cmp('bnbias', dbnbias, bnbias)
-    #     self.cmp('bnraw', dbnraw, bnraw)
-    #     self.cmp('bnvar_inv', dbnvar_inv, bnvar_inv)
-    #     self.cmp('bnvar', dbnvar, bnvar)
-    #     self.cmp('bndiff2', dbndiff2, bndiff2)
-    #     self.cmp('bndiff', dbndiff, bndiff)
-    #     self.cmp('bnmeani', dbnmeani, bnmeani)
-    #     self.cmp('hprebn', dhprebn, hprebn)
-    #     self.cmp('embcat', dembcat, embcat)
-    #     self.cmp('W1', dW1, W1)
-    #     self.cmp('b1', db1, b1)
-    #     self.cmp('emb', demb, emb)
-    #     self.cmp('C', dC, C)
+    #     cmp('logprobs', dlogprobs, logprobs)
+    #     cmp('probs', dprobs, probs)
+    #     cmp('counts_sum_inv', dcounts_sum_inv, counts_sum_inv)
+    #     cmp('counts_sum', dcounts_sum, counts_sum)
+    #     cmp('counts', dcounts, counts)
+    #     cmp('norm_logits', dnorm_logits, norm_logits)
+    #     cmp('logit_maxes', dlogit_maxes, logit_maxes)
+    #     cmp('logits', dlogits, logits)
+    #     cmp('h', dh, h)
+    #     cmp('W2', dW2, W2)
+    #     cmp('b2', db2, b2)
+    #     cmp('hpreact', dhpreact, hpreact)
+    #     cmp('bngain', dbngain, bngain)
+    #     cmp('bnbias', dbnbias, bnbias)
+    #     cmp('bnraw', dbnraw, bnraw)
+    #     cmp('bnvar_inv', dbnvar_inv, bnvar_inv)
+    #     cmp('bnvar', dbnvar, bnvar)
+    #     cmp('bndiff2', dbndiff2, bndiff2)
+    #     cmp('bndiff', dbndiff, bndiff)
+    #     cmp('bnmeani', dbnmeani, bnmeani)
+    #     cmp('hprebn', dhprebn, hprebn)
+    #     cmp('embcat', dembcat, embcat)
+    #     cmp('W1', dW1, W1)
+    #     cmp('b1', db1, b1)
+    #     cmp('emb', demb, emb)
+    #     cmp('C', dC, C)
 
-    def _cross_entropy_loss_manual(self, logits:torch.Tensor, y:torch.Tensor)->torch.Tensor:
+    def manual_cross_entropy_loss(self, logits:torch.Tensor, y:torch.Tensor)->torch.Tensor:
         self.logit_maxes = logits.max(1, keepdim=True).values
         self.norm_logits = logits - self.logit_maxes # subtract max for numerical stability
         self.counts = self.norm_logits.exp()
@@ -191,17 +196,17 @@ class BatchNormalizedMLP:
         #forward pass
         logits = self.forward(x, optim_type, 'train')
 
-        #pytorch loss computation
-        self.pytorch_computed_loss = F.cross_entropy(logits, y, reduction='mean', label_smoothing=reg_factor)
+        #manual loss computation
+        self.cross_entropy_loss = self.manual_cross_entropy_loss(logits, y)
 
         #pytorch backward pass
-        self.pytorch_computed_loss.backward()
+        self.cross_entropy_loss.backward()
 
-        #manual loss computation
-        self.manually_computed_loss = self._cross_entropy_loss_manual(logits, y)
+        #retain grads of intermediate tensors
+        self._retain_intermediate_tensor_grads()
 
         #manual backward pass
-        self._manual_backward_pass(x,y)
+        self.manual_backward_pass(x,y)
 
         #grad update
         for param in self.params:
@@ -244,3 +249,12 @@ def stoi()->dict[str,int]:
 def itos()->dict[int,str]:
     stoi_dict = stoi()
     return {v:k for k,v in stoi_dict.items()}
+
+def cmp(name:str, dt:torch.tensor, t:torch.Tensor)->None:
+    """
+    Utility function for comparing manual gradients to PyTorch gradients
+    """
+    ex = torch.all(dt == t.grad).item()
+    app = torch.allclose(dt, t.grad)
+    maxdiff = (dt - t.grad).abs().max().item()
+    assert ex or app, f"Gradients for {name} do not match! Max difference: {maxdiff}"
