@@ -18,7 +18,7 @@ class BatchNormalizedMLP:
 
         self.C = torch.randn((self.vocab_size, feature_dims), generator=self.generator, requires_grad= True)
         self.H = torch.randn((n*feature_dims,h), generator=self.generator, requires_grad=True)
-        self.b1 = torch.randn(h, generator=self.generator, requires_grad=True)
+        # self.b1 = torch.randn(h, generator=self.generator, requires_grad=True)
         self.W1 = torch.randn((h,self.vocab_size), generator=self.generator, requires_grad=True)
         self.W2 = torch.randn((n*feature_dims,self.vocab_size), generator=self.generator, requires_grad=True)
         self.b2 = torch.randn(self.vocab_size, generator=self.generator, requires_grad=True)
@@ -75,12 +75,13 @@ class BatchNormalizedMLP:
         if not flag: return
 
         self.hprebn = hprebn
+        batch_size = hprebn.shape[0]
 
         if run_type=='train':
-            self.bnmean = 1/self.n*self.hprebn.sum(0, keepdim=True)
+            self.bnmean = 1/batch_size*self.hprebn.sum(0, keepdim=True)
             self.bndiff = self.hprebn - self.bnmean
             self.bndiff2 = self.bndiff**2
-            self.bnvar = 1/(self.n-1)*(self.bndiff2).sum(0, keepdim=True) # note: Bessel's correction (dividing by n-1, not n)
+            self.bnvar = 1/(batch_size-1)*(self.bndiff2).sum(0, keepdim=True) # note: Bessel's correction (dividing by n-1, not n)
             self.bnvar_inv = (self.bnvar + self.bn_epsilon)**-0.5
             with torch.no_grad():
                 self.H_bnmean_running = self.momentum*self.H_bnmean_running + (1-self.momentum)*self.bnmean
@@ -108,74 +109,77 @@ class BatchNormalizedMLP:
         self.logits = self.l1+self.l2
         return self.logits
 
-    # def manual_backward_pass(self, x:torch.Tensor, y:torch.Tensor)->None:
-    #     dlogprobs = torch.zeros([*logprobs.shape])
-    #     dlogprobs[range(n), Yb] += -1*(n**-1)
-    #     dprobs = dlogprobs*(1/probs)
-    #     dcounts_sum_inv = (dprobs*counts).sum(1, keepdims=True)
-    #     dcounts = dprobs*counts_sum_inv
-    #     dcounts_sum = dcounts_sum_inv*(-1/counts_sum**2)
-    #     dcounts = dcounts+ (dcounts_sum*1)
-    #     dnorm_logits = dcounts*(norm_logits.exp())
-    #     dlogit_maxes = dnorm_logits.sum(1, keepdim=True)*(-1)
-    #     dlogits = torch.zeros([*logits.shape])
-    #     dlogits[torch.arange(n), logits.argmax(1)] += dlogit_maxes.view(-1)*1
-    #     dlogits += dnorm_logits
+    def manual_backward_pass(self, x:torch.Tensor, y:torch.Tensor)->None:
+        batch_size = x.shape[0]
+        dlogprobs = torch.zeros([*self.logprobs.shape])
+        dlogprobs[range(batch_size), y] += -1*(batch_size**-1)
+        dprobs = dlogprobs*(1/self.probs)
+        dcounts_sum_inv = (dprobs*self.counts).sum(1, keepdims=True)
+        dcounts = dprobs*self.counts_sum_inv
+        dcounts_sum = dcounts_sum_inv*(-1/self.counts_sum**2)
+        dcounts = dcounts+ (dcounts_sum*1)
+        dnorm_logits = dcounts*(self.norm_logits.exp())
+        dlogit_maxes = dnorm_logits.sum(1, keepdim=True)*(-1)
+        dlogits = torch.zeros([*self.logits.shape])
+        dlogits[torch.arange(batch_size), self.logits.argmax(1)] += dlogit_maxes.view(-1)*1
+        dlogits += dnorm_logits
 
-    #     db2 = (dlogits*1).sum(0) 
-    #     dW2 = torch.zeros([*W2.shape])
-    #     for i in range(n):
-    #     dW2 += dlogits[i].view(1,-1)*h[i].view(-1,1)
-    #     dh = dlogits@W2.T
-    #     dhpreact = dh*(1-h**2)
-    #     dbngain = (dhpreact*bnraw).sum(0)
-    #     dbnbias = (dhpreact*1).sum(0)
-    #     dbnraw = dhpreact*bngain
-    #     dbnvar_inv = (dbnraw*bndiff).sum(0, keepdim=True)
-    #     dbndiff = dbnraw*bnvar_inv
-    #     dbnvar = dbnvar_inv*(-0.5)*((bnvar + 1e-5)**-1.5)
-    #     dbndiff2 = (1.0/(n-1))*torch.ones_like(bndiff2)*dbnvar
-    #     dbndiff += 2*bndiff*dbndiff2
-    #     dhprebn = dbndiff.clone()
-    #     dbnmeani = -dbndiff.sum(0)
-    #     dhprebn += (1/n)*torch.ones_like(hprebn)*dbnmeani
-    #     dembcat = dhprebn @ W1.T
-    #     dW1 = embcat.T @ dhprebn
-    #     db1 = dhprebn.sum(0)
-    #     demb = dembcat.view(emb.shape)
-    #     dC = torch.zeros_like(C)
-    #     for i in range(len(Xb)):
-    #     for j in range(block_size):
-    #         dC[Xb[i,j]] += demb[i,j]
+        dl1, dl2 = dlogits.clone(), dlogits.clone()
+        dh = dl1@self.W1.T
+        dW1 = self.h.T @ dl1
+        dembcat = dl2@self.W2.T
+        dW2 = self.embcat.T@dl2
+        db2 = (1*dl2).sum(0)
+        dhpreact = (1-self.h**2)*dh
 
+        dH_bngain = (dhpreact*self.bnraw).sum(0)
+        dH_bnbias = (dhpreact*1).sum(0)
+        dbnraw = dhpreact*self.H_bngain
+        dbnvar_inv = (dbnraw*self.bndiff).sum(0, keepdim=True)
+        dbndiff = dbnraw*self.bnvar_inv
+        dbnvar = dbnvar_inv*(-0.5)*((self.bnvar + self.bn_epsilon)**-1.5)
+        dbndiff2 = (1.0/(batch_size-1))*torch.ones_like(self.bndiff2)*dbnvar
+        dbndiff += 2*self.bndiff*dbndiff2
+        dhprebn = dbndiff.clone()
+        dbnmean = -dbndiff.sum(0)
+        dhprebn += (1/batch_size)*torch.ones_like(self.hprebn)*dbnmean
+        dembcat = dembcat + dhprebn @ self.H.T
+        dH = self.embcat.T @ dhprebn
+        demb = dembcat.view(self.emb.shape)
+        dC = torch.zeros_like(self.C)
+        for i in range(len(x)):
+            for j in range(self.n):
+                dC[x[i,j]] += demb[i,j]
+    
+        cmp('logprobs', dlogprobs, self.logprobs)
+        cmp('probs', dprobs, self.probs)
+        cmp('counts_sum_inv', dcounts_sum_inv, self.counts_sum_inv)
+        cmp('counts_sum', dcounts_sum, self.counts_sum)
+        cmp('counts', dcounts, self.counts)
+        cmp('norm_logits', dnorm_logits, self.norm_logits)
+        cmp('logit_maxes', dlogit_maxes, self.logit_maxes)
+        cmp('logits', dlogits, self.logits)
+        cmp('l1', dl1, self.l1)
+        cmp('l2', dl2, self.l2)
+        cmp('h', dh, self.h)
+        cmp('W1', dW1, self.W1)
+        cmp('W2', dW2, self.W2)
+        cmp('b2', db2, self.b2)
+        cmp('hpreact', dhpreact, self.hpreact)
+        cmp('dH_bngain', dH_bngain, self.H_bngain)
+        cmp('dH_bnbias', dH_bnbias, self.H_bnbias)
+        cmp('bnraw', dbnraw, self.bnraw)
+        cmp('bnvar_inv', dbnvar_inv, self.bnvar_inv)
+        cmp('bnvar', dbnvar, self.bnvar)
+        cmp('bndiff2', dbndiff2, self.bndiff2)
+        cmp('bndiff', dbndiff, self.bndiff)
+        cmp('bnmean', dbnmean, self.bnmean)
+        cmp('hprebn', dhprebn, self.hprebn)
+        cmp('embcat', dembcat, self.embcat)
+        cmp('H', dH, self.H)
+        cmp('emb', demb, self.emb)
+        cmp('C', dC, self.C)
 
-
-    #     cmp('logprobs', dlogprobs, logprobs)
-    #     cmp('probs', dprobs, probs)
-    #     cmp('counts_sum_inv', dcounts_sum_inv, counts_sum_inv)
-    #     cmp('counts_sum', dcounts_sum, counts_sum)
-    #     cmp('counts', dcounts, counts)
-    #     cmp('norm_logits', dnorm_logits, norm_logits)
-    #     cmp('logit_maxes', dlogit_maxes, logit_maxes)
-    #     cmp('logits', dlogits, logits)
-    #     cmp('h', dh, h)
-    #     cmp('W2', dW2, W2)
-    #     cmp('b2', db2, b2)
-    #     cmp('hpreact', dhpreact, hpreact)
-    #     cmp('bngain', dbngain, bngain)
-    #     cmp('bnbias', dbnbias, bnbias)
-    #     cmp('bnraw', dbnraw, bnraw)
-    #     cmp('bnvar_inv', dbnvar_inv, bnvar_inv)
-    #     cmp('bnvar', dbnvar, bnvar)
-    #     cmp('bndiff2', dbndiff2, bndiff2)
-    #     cmp('bndiff', dbndiff, bndiff)
-    #     cmp('bnmeani', dbnmeani, bnmeani)
-    #     cmp('hprebn', dhprebn, hprebn)
-    #     cmp('embcat', dembcat, embcat)
-    #     cmp('W1', dW1, W1)
-    #     cmp('b1', db1, b1)
-    #     cmp('emb', demb, emb)
-    #     cmp('C', dC, C)
 
     def manual_cross_entropy_loss(self, logits:torch.Tensor, y:torch.Tensor)->torch.Tensor:
         self.logit_maxes = logits.max(1, keepdim=True).values
@@ -185,7 +189,7 @@ class BatchNormalizedMLP:
         self.counts_sum_inv = self.counts_sum**-1 # if I use (1.0 / counts_sum) instead then I can't get backprop to be bit exact...
         self.probs = self.counts * self.counts_sum_inv
         self.logprobs = self.probs.log()
-        loss = -self.logprobs[range(self.n), y].mean()
+        loss = -self.logprobs[range(logits.shape[0]), y].mean()
         return loss
 
     def _training_code(self, x:torch.Tensor, y:torch.Tensor, h:float, reg_factor:float, optim_type:str)->None:
@@ -197,13 +201,14 @@ class BatchNormalizedMLP:
         logits = self.forward(x, optim_type, 'train')
 
         #manual loss computation
+        # self.cross_entropy_loss = F.cross_entropy(logits, y, reduction='mean', label_smoothing=reg_factor)
         self.cross_entropy_loss = self.manual_cross_entropy_loss(logits, y)
-
-        #pytorch backward pass
-        self.cross_entropy_loss.backward()
 
         #retain grads of intermediate tensors
         self._retain_intermediate_tensor_grads()
+
+        #pytorch backward pass
+        self.cross_entropy_loss.backward()
 
         #manual backward pass
         self.manual_backward_pass(x,y)
